@@ -1,5 +1,5 @@
 #include "types.h"
-
+//memset 函数是 内存填充函数，用于将一段内存区域填充为指定的值
 void*
 memset(void *dst, int c, uint n)
 {

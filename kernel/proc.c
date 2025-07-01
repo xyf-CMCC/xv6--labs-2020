@@ -22,6 +22,14 @@ static void freeproc(struct proc *p);
 extern char trampoline[]; // trampoline.S
 
 // initialize the proc table at boot time.
+/*这里修改了kvmmap和kvmpa函数的入口参数，需要在内核头文件中也做出修改。
+这样可以创建进程间相互独立的内核页表了，接下来处理：内核栈。原本的xv6设计中，所有处
+于内核态的进程都共享同一个页表，即意味着共享同一个地址空间。由于xv6支持多核/多进程调度，
+同一时间可能会有多个进程处于内核态，所以需要对所有处于内核态的进程创建其独立的内核态内的
+栈，也就是内核栈，供给其内核态代码执行过程。
+在已经添加的新修改中，每一个进程都会有自己独立的内核页表。而现在需要每个进程只访问自己
+的内核栈，所以可以把每个进程的内核栈映射到各自内核页表的固定位置（不同页表内的同一逻辑地
+址，指向不同物理内存）*/
 void
 procinit(void)
 {
@@ -34,12 +42,13 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
+      //注释掉了上面的代码（为所有进程预分配内核栈的代码），变为创建进程的时候再创建内核栈
   }
   kvminithart();
 }
@@ -120,6 +129,16 @@ found:
     release(&p->lock);
     return 0;
   }
+  // 为新进程创建独立的内核页表，并将内核所需要的各种映射添加到新页表上
+    p->kama_kernelpgtbl = kama_kvminit_newpgtbl();
+
+    // 分配一个物理页，作为新进程的内核栈使用
+    char* pa = kalloc();
+    if (pa == 0)
+        panic("kallo");
+    uint64 va = KSTACK((int)0);     // 将内核栈映射到固定的逻辑地址上
+    kvmmap(p->kama_kernelpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+    p->kstack = va;     // 记录内核栈的虚拟地址
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -133,23 +152,36 @@ found:
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
+// kernel/proc.c
 static void
 freeproc(struct proc *p)
 {
-  if(p->trapframe)
-    kfree((void*)p->trapframe);
-  p->trapframe = 0;
-  if(p->pagetable)
-    proc_freepagetable(p->pagetable, p->sz);
-  p->pagetable = 0;
-  p->sz = 0;
-  p->pid = 0;
-  p->parent = 0;
-  p->name[0] = 0;
-  p->chan = 0;
-  p->killed = 0;
-  p->xstate = 0;
-  p->state = UNUSED;
+    if(p->trapframe)
+        kfree((void*)p->trapframe);
+    p->trapframe = 0;
+    if(p->pagetable)
+        proc_freepagetable(p->pagetable, p->sz);
+    p->pagetable = 0;
+    p->sz = 0;
+    p->pid = 0;
+    p->parent = 0;
+    p->name[0] = 0;
+    p->chan = 0;
+    p->killed = 0;
+    p->xstate = 0;
+
+    // 释放进程的内核栈
+    void* kstack_pa = (void*)kvmpa(p->kama_kernelpgtbl, p->kstack);
+    kfree(kstack_pa);
+    p->kstack = 0;
+
+    // 不能使用 proc_freepagetable释放页表，因为其不仅会释放页表本身，还会把页表内所有的叶节点对应的物理页也释放掉。
+    // 这会导致内核运行所需要的关键物理页被释放，造成内核崩溃。
+    
+    // 递归释放进程独享的页表，释放页表本身所占用的空间，但不释放页表指向的物理页
+    kama_kvm_free_kernelpgtbl(p->kama_kernelpgtbl);
+    p->kama_kernelpgtbl = 0;
+    p->state = UNUSED;
 }
 
 // Create a user page table for a given process,
@@ -473,7 +505,16 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+            // 切换到进程独立的内核页表
+        w_satp(MAKE_SATP(p->kama_kernelpgtbl));
+        sfence_vma();       // 清除快表缓存，刷新TLB缓存，以确保地址转换表的更改生效
+
+         // 调度，执行进程
         swtch(&c->context, &p->context);
+
+        // 切换回全局内核页表
+        kvminithart();
+    
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
