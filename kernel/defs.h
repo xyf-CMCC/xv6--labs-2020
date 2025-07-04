@@ -58,11 +58,13 @@ void            itrunc(struct inode*);
 void            ramdiskinit(void);
 void            ramdiskintr(void);
 void            ramdiskrw(struct buf*);
+void            kama_krefpage(void* pa);
 
 // kalloc.c
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -171,6 +173,11 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
+void            kama_krefpage(void* pa);
+void*           kama_kcopy_n_deref(void* pa);
+// 在 defs.h 的适当位置添加
+int             kama_uvmcheckcowpage(uint64 va);
+int             kama_uvmcowcopy(uint64 va);
 
 // plic.c
 void            plicinit(void);
